@@ -1,0 +1,236 @@
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI Video Interview (n8n)</title>
+  <style>
+    :root{font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0}
+    body{display:flex;gap:24px;flex-direction:column;align-items:center;padding:24px;background:#f6f8fa;color:#0b1220}
+    .card{background:white;border-radius:12px;padding:18px;box-shadow:0 6px 18px rgba(11,17,32,.06);width:900px;max-width:96%}
+    .grid{display:grid;grid-template-columns:1fr 320px;gap:18px}
+    video{width:100%;height:100%;background:#000;border-radius:8px}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    button{padding:10px 14px;border-radius:8px;border:0;background:#111827;color:white;cursor:pointer}
+    button.secondary{background:#e6e9ef;color:#111827}
+    input,select,textarea{padding:8px;border-radius:8px;border:1px solid #e3e6ea;width:100%}
+    .qa{display:flex;flex-direction:column;gap:8px}
+    .small{font-size:13px;color:#4b5563}
+    .muted{color:#6b7280}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>AI Video Interview — n8n webhook uploader</h2>
+    <div class="grid">
+      <div>
+        <div style="margin-bottom:10px">
+          <label class="small">Candidate name</label>
+          <input id="candidateName" placeholder="Revathy Arjun" />
+        </div>
+
+        <div style="margin-bottom:10px">
+          <label class="small">n8n Webhook URL</label>
+          <input id="webhookUrl" placeholder="http://localhost:5678/webhook-test/video-interview" />
+        </div>
+
+        <div class="qa">
+          <label class="small">Interview questions</label>
+          <textarea id="questions" rows="6">Tell us about yourself.
+Describe a challenging data problem you solved.
+How do you approach building a dashboard for non-technical stakeholders?</textarea>
+          <div class="small muted">One question per line. Each recording will be uploaded separately to your webhook.</div>
+        </div>
+
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <button id="startCamera">Start camera</button>
+          <button id="stopCamera" class="secondary">Stop camera</button>
+          <button id="startInterview">Start interview</button>
+          <button id="reset" class="secondary">Reset</button>
+        </div>
+
+        <div style="margin-top:12px">
+          <div class="small">Current question:</div>
+          <div id="currentQuestion" style="font-weight:600;margin-top:6px;min-height:44px"></div>
+        </div>
+
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button id="record" disabled>Start recording</button>
+          <button id="stop" disabled class="secondary">Stop recording</button>
+          <button id="upload" disabled>Upload last answer</button>
+        </div>
+
+        <div style="margin-top:12px">
+          <label class="small">Status</label>
+          <div id="status" class="small muted">idle</div>
+        </div>
+
+      </div>
+
+      <div>
+        <video id="localVideo" autoplay playsinline muted></video>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <div class="small">Preview</div>
+          <div style="flex:1"></div>
+          <div class="small muted">Recorded clips will appear as downloadable links below after stop</div>
+        </div>
+        <div id="clips" style="margin-top:10px;display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // CONFIG (no secrets here) - user will paste their own webhook URL
+    const startCameraBtn = document.getElementById('startCamera');
+    const stopCameraBtn = document.getElementById('stopCamera');
+    const startInterviewBtn = document.getElementById('startInterview');
+    const recordBtn = document.getElementById('record');
+    const stopBtn = document.getElementById('stop');
+    const uploadBtn = document.getElementById('upload');
+    const resetBtn = document.getElementById('reset');
+
+    const videoEl = document.getElementById('localVideo');
+    const clipsEl = document.getElementById('clips');
+    const statusEl = document.getElementById('status');
+    const currentQuestionEl = document.getElementById('currentQuestion');
+
+    let mediaStream = null;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let lastBlob = null;
+
+    let questions = [];
+    let currentIndex = -1;
+    let candidateNameInput = document.getElementById('candidateName');
+    let webhookUrlInput = document.getElementById('webhookUrl');
+    let questionsInput = document.getElementById('questions');
+
+    function logStatus(txt){ statusEl.textContent = txt }
+
+    async function startCamera(){
+      try{
+        mediaStream = await navigator.mediaDevices.getUserMedia({video:{width:1280}, audio:true});
+        videoEl.srcObject = mediaStream;
+        logStatus('Camera started');
+      }catch(e){
+        console.error(e); logStatus('Camera error: '+e.message)
+      }
+    }
+
+    function stopCamera(){
+      if(mediaStream){
+        mediaStream.getTracks().forEach(t=>t.stop());
+        mediaStream = null;
+        videoEl.srcObject = null;
+        logStatus('Camera stopped');
+      }
+    }
+
+    startCameraBtn.addEventListener('click', startCamera);
+    stopCameraBtn.addEventListener('click', stopCamera);
+
+    startInterviewBtn.addEventListener('click', ()=>{
+      const raw = questionsInput.value.trim();
+      if(!raw){ alert('Please enter at least one question'); return; }
+      questions = raw.split('\n').map(s=>s.trim()).filter(Boolean);
+      currentIndex = 0;
+      showQuestion();
+      recordBtn.disabled = false;
+      uploadBtn.disabled = true;
+      logStatus('Interview started');
+    });
+
+    function showQuestion(){
+      currentQuestionEl.textContent = questions[currentIndex] || '';
+    }
+
+    recordBtn.addEventListener('click', ()=>{
+      if(!mediaStream){ alert('Start the camera first'); return; }
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(mediaStream, {mimeType: 'video/webm;codecs=vp8,opus'});
+      mediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size>0) recordedChunks.push(e.data) };
+      mediaRecorder.onstop = handleStop;
+      mediaRecorder.start();
+      recordBtn.disabled = true;
+      stopBtn.disabled = false;
+      logStatus('Recording...');
+    });
+
+    stopBtn.addEventListener('click', ()=>{
+      if(mediaRecorder && mediaRecorder.state!=='inactive'){
+        mediaRecorder.stop();
+        stopBtn.disabled = true;
+      }
+    });
+
+    function handleStop(){
+      lastBlob = new Blob(recordedChunks, {type:'video/webm'});
+      const url = URL.createObjectURL(lastBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (candidateNameInput.value||'candidate') + '_q' + (currentIndex+1) + '.webm';
+      a.textContent = `Download answer #${currentIndex+1}`;
+      clipsEl.prepend(a);
+      uploadBtn.disabled = false;
+      recordBtn.disabled = false;
+      logStatus('Recording stopped — ready to upload');
+    }
+
+    uploadBtn.addEventListener('click', async ()=>{
+      if(!lastBlob) return alert('No recording to upload');
+      const webhookUrl = webhookUrlInput.value.trim();
+      if(!webhookUrl) return alert('Please paste your n8n webhook URL');
+
+      uploadBtn.disabled = true;
+      logStatus('Uploading...');
+
+      const form = new FormData();
+      form.append('candidateName', candidateNameInput.value || 'Candidate');
+      form.append('questionIndex', String(currentIndex));
+      form.append('questionText', questions[currentIndex] || '');
+      form.append('metadata', JSON.stringify({userAgent:navigator.userAgent, timestamp: new Date().toISOString()}));
+      form.append('video', lastBlob, (candidateNameInput.value||'candidate') + '_q' + (currentIndex+1) + '.webm');
+
+      try{
+        const res = await fetch(webhookUrl, {method:'POST', body:form});
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        logStatus('Uploaded answer #' + (currentIndex+1));
+      }catch(err){
+        console.error(err);
+        logStatus('Upload failed: '+err.message);
+      }finally{
+        uploadBtn.disabled = false;
+      }
+
+      // advance to next question automatically if available
+      currentIndex++;
+      if(currentIndex < questions.length){
+        showQuestion();
+        lastBlob = null; // require recording again
+        uploadBtn.disabled = true;
+      }else{
+        currentQuestionEl.textContent = 'Interview finished';
+        logStatus('Interview completed');
+        recordBtn.disabled = true;
+      }
+    });
+
+    resetBtn.addEventListener('click', ()=>{
+      questions = [];
+      currentIndex = -1;
+      currentQuestionEl.textContent = '';
+      clipsEl.innerHTML = '';
+      recordBtn.disabled = true;
+      stopBtn.disabled = true;
+      uploadBtn.disabled = true;
+      logStatus('Reset');
+    });
+
+    // convenience: expose sample webhook for local testing (commented out)
+    // webhookUrlInput.value = 'http://localhost:5678/webhook/test';
+
+    // autos-start camera on page load (optional)
+    // startCamera();
+
+  </script>
+</body>
+</html>
